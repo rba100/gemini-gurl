@@ -12,11 +12,14 @@ class GeminiClient
     private readonly Uri _baseUrl;
     private IPAddress? _hostAddress;
 
-    public GeminiClient(Uri baseUrl)
+    private bool _allowInsecure;
+
+    public GeminiClient(Uri baseUrl, bool allowInsecure)
     {
         if (baseUrl.Scheme != "gemini") throw new ArgumentException("baseUrl must be a gemini endpoint");
 
         _baseUrl = baseUrl;
+        _allowInsecure = allowInsecure;
     }
 
     private void Init()
@@ -24,7 +27,7 @@ class GeminiClient
         if (_hostAddress is not null) return;
         var hostAddresses = Dns.GetHostAddresses(_baseUrl.Host);
         _hostAddress = hostAddresses.FirstOrDefault();
-        if (_hostAddress is null) throw new Exception("Could not find host");
+        if (_hostAddress is null) throw new GeminiException("Could not find host");
     }
 
     private Stream Open()
@@ -35,7 +38,7 @@ class GeminiClient
         socket.Connect(_hostAddress, port);
 
         NetworkStream networkStream = new NetworkStream(socket);
-        SslStream sslStream = new SslStream(networkStream);
+        var sslStream = new SslStream(networkStream);
 
         var options = new SslClientAuthenticationOptions();
         options.TargetHost = _baseUrl.Host;
@@ -48,11 +51,11 @@ class GeminiClient
 
     private bool Validate(object sender, X509Certificate? certificate, X509Chain? chain, SslPolicyErrors sslPolicyErrors)
     {
-        //Console.WriteLine(certificate?.ToString() ?? "null");
-        return true;
+        return _allowInsecure || sslPolicyErrors == SslPolicyErrors.None;
     }
 
-    public GeminiResponse Get() {
+    public GeminiResponse Get()
+    {
         return Get("");
     }
 
@@ -60,21 +63,38 @@ class GeminiClient
     {
         var url = new Uri(_baseUrl, path);
 
-        using var stream = Open();
-        using var writer = new StreamWriter(stream, new UTF8Encoding(false));
-        writer.NewLine = "\r\n";
+        var stream = Open();
 
+        using var writer = new StreamWriter(stream, new UTF8Encoding(false), leaveOpen: true);
+        writer.NewLine = "\r\n";
         writer.WriteLine(url.ToString());
         writer.Flush();
 
-        using var reader = new StreamReader(stream, Encoding.UTF8);
+        var u = new UTF8Encoding(false);
 
-        var header = reader.ReadLine();
+        // StreamReader can advance the stream too far so we'll just poor man it here.
+        var headerStream = new MemoryStream();
+        int state = 0;
+        while (state < 2)
+        {
+            var b = stream.ReadByte();
+
+            switch (b)
+            {
+                case -1: throw new GeminiException("No header or content was received");
+                case 13: state = state == 0 ? 1 : 0; break;
+                case 10: state = state == 1 ? 2 : 0; break;
+                default: headerStream.WriteByte((byte)b); break;
+            }
+        }
+
+        var header = Encoding.UTF8.GetString(headerStream.ToArray());
+
         var parts = header.Split(" ", 2, StringSplitOptions.None);
-        var statusCode = Int32.Parse(parts[0]);
+        if (parts.Length != 2) throw new GeminiException("Protocol error: header malformed.");
+        if (!int.TryParse(parts[0], out int status)) throw new GeminiException("Protocol error: header malformed.");
         var meta = parts[1];
-        var content = reader.ReadToEnd();
 
-        return new GeminiResponse(statusCode, meta, content);
+        return new GeminiResponse(status, meta, stream);
     }
 }

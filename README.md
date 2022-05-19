@@ -9,6 +9,6 @@ A CLI tool for retrieving gemini contenet
 
 ## Build
 
-dotnet publish
+`dotnet publish`
 
 rename the binary as desired.
