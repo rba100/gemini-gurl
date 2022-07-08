@@ -1,5 +1,5 @@
 # gemini-gurl
-A CLI tool for retrieving gemini contenet
+A CLI tool for retrieving gemini content.
 
 ## Usage
 
